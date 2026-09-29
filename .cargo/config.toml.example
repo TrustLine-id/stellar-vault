@@ -1,0 +1,6 @@
+# Optional: develop against a local stellar-sdk checkout.
+#   cp .cargo/config.toml.example .cargo/config.toml
+# Without this file, builds (including scripts/deploy-testnet.sh) use crates.io.
+
+[patch.crates-io]
+trustline-sdk = { path = "../stellar-sdk/crates/trustline-sdk" }

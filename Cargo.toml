@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+  "contracts/*",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+authors = ["Trustline Digital Asset Ltd. <contact@trustline.id>"]
+repository = "https://github.com/TrustLine-id/stellar-vault"
+
+[workspace.dependencies]
+soroban-sdk = "=27.0.6"
+trustline-sdk = "=0.2.0"
+stellar-contract-utils = { git = "https://github.com/OpenZeppelin/stellar-contracts", rev = "a5bd8cbd3d0bb8efbd5cf5e2edf9734f87e47640" }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

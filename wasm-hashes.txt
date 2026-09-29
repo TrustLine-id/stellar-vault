@@ -1,0 +1,13 @@
+# Expected sha256 of optimized WASM from `stellar contract build`
+# with the pinned Rust + Stellar CLI in versions.env / rust-toolchain.toml,
+# Cargo.lock, and no local .cargo/config.toml override.
+#
+# Regenerate after an intentional contract change:
+#   ./scripts/record-wasm-hashes.sh
+#
+# Verify:
+#   ./scripts/check-wasm-hashes.sh
+
+dummy_adapter.wasm 5e3b9d8081d3c10d883b66ddb3441c88a08796c80d4994786e4e9902b8e00700
+mock_validation_engine.wasm bb25d3c78db4e1ce0ccd700258c70cf9601612a41dc5db16d352203d3278a93e
+trustline_vault.wasm ebdf2634891ab4f6d709541f22de32c5812da05433b584a9c9e6328679e13c4d
