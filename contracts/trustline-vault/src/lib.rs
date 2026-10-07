@@ -37,7 +37,7 @@ use trustline_sdk::{
     validation_engine as read_validation_engine,
 };
 
-/// Virtual shares offset (inflation-attack mitigation, SEP-56 / OZ-style).
+/// Virtual shares offset used to mitigate donation attacks.
 /// Tests mirror this constant — keep in sync when changing.
 pub(crate) const VIRTUAL_SHARES: i128 = 1_000_000;
 
@@ -158,6 +158,7 @@ impl QueueHost for Host {
 impl VaultFees for TrustlineVault {
     type Host = Host;
 
+    /// Accrue the management fee due as new shares. Anyone may call this.
     fn accrue(e: &Env) {
         FeeLib::accrue::<Host>(e);
         bump_instance(e);
@@ -166,9 +167,12 @@ impl VaultFees for TrustlineVault {
 
 #[contractimpl]
 impl TrustlineVault {
-    /// Deploy the vault. Bootstrap: **owner only**.
+    /// Deploy a vault bound to `validation_engine` and underlying `asset`.
     ///
-    /// Initial `fees` apply at once; `default_timelock` seeds every op bucket (incl. `SetFees`).
+    /// `owner` is the only initial role. `decimals` (at most 18), `name`, and `symbol` describe
+    /// the share token; deployments conventionally use the asset's decimals plus six. Initial
+    /// `fees` apply immediately, and `default_timelock` (at most 365 days) seeds every operation
+    /// bucket, including `SetFees`.
     pub fn __constructor(
         env: Env,
         validation_engine: Address,
@@ -205,19 +209,22 @@ impl TrustlineVault {
 
     // ─── reads ─────────────────────────────────────────────────────────────
 
+    /// Return the Validation Engine used to check Trustline approvals.
     pub fn validation_engine(env: Env) -> Address {
         read_validation_engine(&env)
     }
 
+    /// Return the owner, who appoints the curator and sentinels.
     pub fn owner(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Owner).unwrap()
     }
 
-    /// `None` until Owner calls `set_curator`.
+    /// Return the curator, or `None` until the owner appoints one.
     pub fn curator(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Curator)
     }
 
+    /// Return all addresses currently allowed to allocate vault assets.
     pub fn allocators(env: Env) -> Vec<Address> {
         env.storage()
             .instance()
@@ -225,6 +232,7 @@ impl TrustlineVault {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Return whether `who` is an allocator.
     pub fn is_allocator(env: Env, who: Address) -> bool {
         env.storage()
             .instance()
@@ -232,59 +240,72 @@ impl TrustlineVault {
             .unwrap_or(false)
     }
 
+    /// Return all sentinels, who may revoke operations, lower caps, and deallocate.
     pub fn sentinels(env: Env) -> Vec<Address> {
         timelock::sentinels(&env)
     }
 
+    /// Return whether `who` is a sentinel.
     pub fn is_sentinel(env: Env, who: Address) -> bool {
         timelock::is_sentinel(&env, &who)
     }
 
+    /// Return the initial delay, in seconds, assigned to each timelock bucket.
     pub fn default_timelock(env: Env) -> u64 {
         timelock::default_delay(&env)
     }
 
-    /// Per-op delay in seconds.
+    /// Return the delay for operations of `kind`, in seconds.
     pub fn timelock(env: Env, kind: TimelockOpKind) -> u64 {
         timelock::op_delay(&env, &kind)
     }
 
+    /// Return whether operations of `kind` have been permanently disabled.
     pub fn abdicated(env: Env, kind: TimelockOpKind) -> bool {
         timelock::is_abdicated(&env, &kind)
     }
 
+    /// Return the Unix timestamp when `op` becomes executable, or `None` if not pending.
     pub fn executable_at(env: Env, op: PendingOp) -> Option<u64> {
         timelock::executable_at(&env, &op)
     }
 
+    /// Return assets allocated to `adapter`, in underlying asset units.
     pub fn allocation(env: Env, adapter: Address) -> i128 {
         caps::allocation(&env, &adapter)
     }
 
+    /// Return the adapter's absolute allocation cap, in underlying asset units.
     pub fn absolute_cap(env: Env, adapter: Address) -> i128 {
         caps::absolute_cap(&env, &adapter)
     }
 
+    /// Return the adapter's relative cap in WAD units (`1e18` = 100%).
     pub fn relative_cap(env: Env, adapter: Address) -> i128 {
         caps::relative_cap(&env, &adapter)
     }
 
+    /// Return the underlying SEP-41 asset contract.
     pub fn query_asset(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Asset).unwrap()
     }
 
+    /// Return the number of decimals used by the vault share token.
     pub fn decimals(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::Decimals).unwrap()
     }
 
+    /// Return the vault share token name.
     pub fn name(env: Env) -> String {
         env.storage().instance().get(&DataKey::Name).unwrap()
     }
 
+    /// Return the vault share token symbol.
     pub fn symbol(env: Env) -> String {
         env.storage().instance().get(&DataKey::Symbol).unwrap()
     }
 
+    /// Return the issued share supply, in share units.
     pub fn total_supply(env: Env) -> i128 {
         env.storage()
             .instance()
@@ -292,6 +313,7 @@ impl TrustlineVault {
             .unwrap_or(0)
     }
 
+    /// Return `id`'s share balance, in share units.
     pub fn balance(env: Env, id: Address) -> i128 {
         env.storage()
             .persistent()
@@ -299,6 +321,7 @@ impl TrustlineVault {
             .unwrap_or(0)
     }
 
+    /// Return the shares `spender` may transfer from `from`.
     pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
         env.storage()
             .temporary()
@@ -306,10 +329,12 @@ impl TrustlineVault {
             .unwrap_or(0)
     }
 
+    /// Return all registered yield adapters.
     pub fn adapters(env: Env) -> Vec<Address> {
         env.storage().instance().get(&DataKey::Adapters).unwrap()
     }
 
+    /// Return whether `adapter` is registered with this vault.
     pub fn is_adapter(env: Env, adapter: Address) -> bool {
         env.storage()
             .instance()
@@ -317,10 +342,12 @@ impl TrustlineVault {
             .unwrap_or(false)
     }
 
+    /// Return the adapter used for automatic deposits and withdrawal liquidity.
     pub fn liquidity_adapter(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::LiquidityAdapter)
     }
 
+    /// Return the opaque data passed to the liquidity adapter.
     pub fn liquidity_data(env: Env) -> Bytes {
         env.storage()
             .instance()
@@ -328,14 +355,14 @@ impl TrustlineVault {
             .unwrap_or_else(|| Bytes::new(&env))
     }
 
-    /// Idle underlying held by the vault contract.
+    /// Return idle underlying held by the vault, in asset units.
     pub fn idle_assets(env: Env) -> i128 {
         let asset = Self::query_asset(env.clone());
         let self_addr = env.current_contract_address();
         token::Client::new(&env, &asset).balance(&self_addr)
     }
 
-    /// Idle + Σ adapter `real_assets`. Same value fees / conversions use.
+    /// Return idle assets plus every adapter's `real_assets`, in asset units.
     pub fn total_assets(env: Env) -> i128 {
         let mut total = Self::idle_assets(env.clone());
         let adapters: Vec<Address> = Self::adapters(env.clone());
@@ -355,20 +382,22 @@ impl TrustlineVault {
     }
 
     // ── QUEUE plug (comment these entrypoints out with the QueueHost impl) ──
+    /// Return queued withdrawals in FIFO order.
     pub fn withdrawal_queue(env: Env) -> Vec<WithdrawRequest> {
         queue::queue(&env)
     }
 
+    /// Return the number of queued withdrawals.
     pub fn withdrawal_queue_len(env: Env) -> u32 {
         queue::len(&env)
     }
 
-    /// Optional manager who may cancel any queued withdrawal (queue-layer only).
+    /// Return the optional manager allowed to cancel any queued withdrawal.
     pub fn queue_manager(env: Env) -> Option<Address> {
         queue::manager(&env)
     }
 
-    /// Curator: set or clear the queue manager (`None` clears). Queue-layer storage only.
+    /// Curator: set or clear the queue manager. Requires Trustline approval.
     pub fn set_queue_manager(env: Env, manager: Option<Address>) {
         let curator = Self::require_curator(&env);
         require_trustline!(env, curator, 0, "set_queue_manager"(manager));
@@ -388,49 +417,61 @@ impl TrustlineVault {
 
     // ─── Conversions / previews (after management fee due) ─────────────────
 
+    /// Convert `assets` to shares at the current price, rounded down.
     pub fn convert_to_shares(env: Env, assets: i128) -> i128 {
         FeeLib::to_shares::<Host>(&env, assets, Rounding::Floor)
     }
 
+    /// Convert `shares` to underlying assets at the current price, rounded down.
     pub fn convert_to_assets(env: Env, shares: i128) -> i128 {
         FeeLib::to_assets::<Host>(&env, shares, Rounding::Floor)
     }
 
+    /// Return the maximum assets `receiver` may deposit; currently unlimited.
     pub fn max_deposit(_env: Env, _receiver: Address) -> i128 {
         i128::MAX
     }
 
+    /// Preview shares minted for an asset deposit, rounded down.
     pub fn preview_deposit(env: Env, assets: i128) -> i128 {
         FeeLib::to_shares::<Host>(&env, assets, Rounding::Floor)
     }
 
+    /// Return the maximum shares `receiver` may mint; currently unlimited.
     pub fn max_mint(_env: Env, _receiver: Address) -> i128 {
         i128::MAX
     }
 
+    /// Preview assets required to mint `shares`, rounded up.
     pub fn preview_mint(env: Env, shares: i128) -> i128 {
         FeeLib::to_assets::<Host>(&env, shares, Rounding::Ceil)
     }
 
+    /// Return the assets `owner` can receive by selling all shares, net of fees.
     pub fn max_withdraw(env: Env, owner: Address) -> i128 {
         let bal = Self::balance(env.clone(), owner.clone());
         FeeLib::sale::<Host>(&env, Some(&owner), bal).paid
     }
 
+    /// Preview shares needed for `assets`; holder-specific performance fees are excluded.
     pub fn preview_withdraw(env: Env, assets: i128) -> i128 {
         FeeLib::shares_for::<Host>(&env, None, assets).expect("preview_withdraw")
     }
 
+    /// Return the shares `owner` may redeem; liquidity shortages queue the request.
     pub fn max_redeem(env: Env, owner: Address) -> i128 {
         Self::balance(env, owner)
     }
 
+    /// Preview assets paid for `shares`; holder-specific performance fees are excluded.
     pub fn preview_redeem(env: Env, shares: i128) -> i128 {
         FeeLib::sale::<Host>(&env, None, shares).paid
     }
 
     // ─── SEP-41 share token ────────────────────────────────────────────────
 
+    /// Authorize `spender` to transfer `amount` shares from `from`.
+    /// The allowance uses temporary storage; `expiration_ledger` is currently ignored.
     pub fn approve(env: Env, from: Address, spender: Address, amount: i128, _expiration_ledger: u32) {
         from.require_auth();
         assert!(amount >= 0, "amount");
@@ -446,6 +487,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
+    /// Transfer `amount` shares from `from` to `to`. Requires `from` authorization.
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
         from.require_auth();
         FeeLib::record_transfer::<Host>(&env, &from, &to, amount);
@@ -453,6 +495,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
+    /// Transfer `amount` approved shares from `from` to `to`. Requires `spender` authorization.
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
         spender.require_auth();
         let key = DataKey::Allowance(from.clone(), spender.clone());
@@ -468,6 +511,8 @@ impl TrustlineVault {
 
     // ─── SEP-56 investor entrypoints (Trustline + fee hooks) ───────────────
 
+    /// Deposit `assets` from `from` and mint shares to `receiver`.
+    /// Requires `operator` authorization and Trustline approval for the asset amount.
     pub fn deposit(
         env: Env,
         assets: i128,
@@ -494,6 +539,8 @@ impl TrustlineVault {
         shares
     }
 
+    /// Mint exactly `shares` to `receiver`, pulling the required assets from `from`.
+    /// Requires `operator` authorization and Trustline approval for the share amount.
     pub fn mint(
         env: Env,
         shares: i128,
@@ -520,7 +567,8 @@ impl TrustlineVault {
         assets
     }
 
-    /// Withdraw `assets`. Queue empty + liquid → settle now; else enqueue only.
+    /// Withdraw exactly `assets`; settle when liquid or enqueue in FIFO order.
+    /// Requires `operator` authorization and Trustline approval; returns shares consumed or escrowed.
     pub fn withdraw(
         env: Env,
         assets: i128,
@@ -552,7 +600,8 @@ impl TrustlineVault {
         */
     }
 
-    /// Redeem `shares`. Queue empty + liquid → settle now; else enqueue only.
+    /// Redeem exactly `shares`; settle when liquid or enqueue in FIFO order.
+    /// Requires `operator` authorization and Trustline approval; returns assets paid immediately.
     pub fn redeem(
         env: Env,
         shares: i128,
@@ -587,8 +636,9 @@ impl TrustlineVault {
         */
     }
 
-    /// Anyone: settle up to `max` queued withdrawals FIFO (`max == 0` → no limit).
     // QUEUE: comment this entrypoint out when disabling the queue layer.
+    /// Settle up to `max` queued withdrawals FIFO (`0` means no limit). Anyone may call.
+    /// Stops at the first request that cannot be paid and returns the number settled.
     pub fn process_withdrawals(env: Env, max: u32) -> u32 {
         FeeLib::accrue::<Host>(&env);
         bump_instance(&env);
@@ -597,6 +647,7 @@ impl TrustlineVault {
 
     // ─── Roles / timelock (Trustline on Owner/Curator paths) ───────────────
 
+    /// Owner: transfer vault ownership. Requires Trustline approval.
     pub fn set_owner(env: Env, new_owner: Address) {
         let owner = Self::require_owner(&env);
         require_trustline!(env, owner, 0, "set_owner"(new_owner));
@@ -604,6 +655,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
+    /// Owner: appoint the curator. Requires Trustline approval.
     pub fn set_curator(env: Env, new_curator: Address) {
         let owner = Self::require_owner(&env);
         require_trustline!(env, owner, 0, "set_curator"(new_curator));
@@ -611,7 +663,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
-    /// Owner: add/remove Sentinels. Immediate.
+    /// Owner: add or remove a sentinel immediately. Requires Trustline approval.
     pub fn set_is_sentinel(env: Env, who: Address, is_sentinel: bool) {
         let owner = Self::require_owner(&env);
         require_trustline!(
@@ -624,8 +676,8 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
-    /// Curator: queue a timelocked op (Trustline). Always required before execute,
-    /// including when `timelock_delay == 0` (eta = now).
+    /// Curator: queue a timelocked operation. Requires Trustline approval.
+    /// Submission is required even when the operation's delay is zero.
     pub fn submit(env: Env, op: PendingOp) {
         let curator = Self::require_curator(&env);
         require_trustline!(env, curator, 0, "submit"(op));
@@ -633,7 +685,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
-    /// Curator or Sentinel: drop a pending op.
+    /// Curator or Sentinel: revoke a pending operation immediately. No Trustline check.
     pub fn revoke(env: Env, actor: Address, op: PendingOp) {
         actor.require_auth();
         let ok = Self::curator(env.clone()) == Some(actor.clone())
@@ -643,8 +695,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
-    /// Execute after `submit` once `executable_at` is due. Anyone. No Trustline
-    /// (gated at submit). Same flow when `timelock_delay == 0`.
+    /// Execute a submitted allocator-role change once due. Anyone may call; no new Trustline check.
     pub fn set_is_allocator(env: Env, who: Address, is_allocator: bool) {
         let op = PendingOp::SetIsAllocator(who.clone(), is_allocator);
         timelock::begin_execute(&env, &op);
@@ -652,6 +703,8 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
+    /// Execute a submitted `AddAdapter` operation once due.
+    /// The adapter must target this vault and asset and report zero assets.
     pub fn add_adapter(env: Env, adapter: Address) {
         let op = PendingOp::AddAdapter(adapter.clone());
         timelock::begin_execute(&env, &op);
@@ -659,6 +712,8 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
+    /// Execute a submitted `RemoveAdapter` operation once due.
+    /// The adapter must hold no assets or recorded allocation.
     pub fn remove_adapter(env: Env, adapter: Address) {
         let op = PendingOp::RemoveAdapter(adapter.clone());
         timelock::begin_execute(&env, &op);
@@ -666,6 +721,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
+    /// Execute a submitted increase of `kind`'s delay, in seconds.
     pub fn increase_timelock(env: Env, kind: TimelockOpKind, new_duration: u64) {
         let op = PendingOp::IncreaseTimelock(kind.clone(), new_duration);
         timelock::begin_execute(&env, &op);
@@ -673,6 +729,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
+    /// Execute a submitted decrease of `kind`'s delay, in seconds.
     pub fn decrease_timelock(env: Env, kind: TimelockOpKind, new_duration: u64) {
         let op = PendingOp::DecreaseTimelock(kind.clone(), new_duration);
         timelock::begin_execute(&env, &op);
@@ -680,6 +737,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
+    /// Execute a submitted abdication, permanently disabling operations of `kind`.
     pub fn abdicate(env: Env, kind: TimelockOpKind) {
         let op = PendingOp::Abdicate(kind.clone());
         timelock::begin_execute(&env, &op);
@@ -687,6 +745,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
+    /// Execute a submitted absolute-cap increase, in underlying asset units.
     pub fn increase_absolute_cap(env: Env, adapter: Address, new_absolute_cap: i128) {
         let op = PendingOp::IncreaseAbsoluteCap(adapter.clone(), new_absolute_cap);
         timelock::begin_execute(&env, &op);
@@ -694,6 +753,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
+    /// Execute a submitted relative-cap increase in WAD units (`1e18` = 100%).
     pub fn increase_relative_cap(env: Env, adapter: Address, new_relative_cap: i128) {
         let op = PendingOp::IncreaseRelativeCap(adapter.clone(), new_relative_cap);
         timelock::begin_execute(&env, &op);
@@ -701,7 +761,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
-    /// Curator or Sentinel: lower absolute cap immediately.
+    /// Curator or Sentinel: lower an absolute cap immediately, in asset units. No Trustline check.
     pub fn decrease_absolute_cap(
         env: Env,
         actor: Address,
@@ -716,7 +776,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
-    /// Curator or Sentinel: lower relative cap immediately.
+    /// Curator or Sentinel: lower a relative cap immediately in WAD units. No Trustline check.
     pub fn decrease_relative_cap(
         env: Env,
         actor: Address,
@@ -731,7 +791,7 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
-    /// Execute after `submit(SetFees)` — fee change via the general curator timelock.
+    /// Execute a submitted fee change once due. Anyone may call; rates are basis points.
     pub fn set_fees(
         env: Env,
         receiver: Address,
@@ -758,6 +818,8 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
+    /// Allocator: select or clear the adapter used for deposits and withdrawal liquidity.
+    /// Requires Trustline approval; `data` is passed unchanged to the adapter.
     pub fn set_liquidity_adapter(
         env: Env,
         allocator: Address,
@@ -787,6 +849,8 @@ impl TrustlineVault {
         bump_instance(&env);
     }
 
+    /// Allocator: move `assets` from the vault into a registered adapter.
+    /// Requires Trustline approval and enforces the adapter's absolute and relative caps.
     pub fn allocate(
         env: Env,
         allocator: Address,
@@ -808,7 +872,8 @@ impl TrustlineVault {
         Self::allocate_internal(&env, &adapter, &data, assets);
     }
 
-    /// Allocator **or** Sentinel (Sentinel may deallocate to reduce risk).
+    /// Allocator or Sentinel: return `assets` from a registered adapter to the vault.
+    /// Requires Trustline approval; Sentinels may call it to reduce risk.
     pub fn deallocate(
         env: Env,
         actor: Address,

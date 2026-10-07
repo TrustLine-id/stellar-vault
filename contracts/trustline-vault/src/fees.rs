@@ -9,7 +9,7 @@
 //! [`docs/VAULT_FEES_INTEGRATION.md`](../../../docs/VAULT_FEES_INTEGRATION.md).
 //!
 //! Where each calculation comes from:
-//! - [OZ]: OpenZeppelin `stellar-contracts` at `a5bd8cb`
+//! - [Math]: 256-bit `mul_div_with_rounding` from OpenZeppelin `stellar-contract-utils`
 //! - [Std]: standard vault management-fee math (yearly rate, fee shares, previews)
 //! - [Ours]: per-holder cost / performance fee, tiered penalty
 
@@ -17,7 +17,7 @@ use soroban_sdk::{
     contracterror, contractevent, contracttrait, contracttype, panic_with_error, Address, Env,
     Vec,
 };
-// [OZ] x × y / d in 256 bits, rounded as asked: every product and division below.
+// [Math] x × y / d in 256 bits, rounded as requested.
 use stellar_contract_utils::math::{i128_fixed_point::mul_div_with_rounding as mul_div, Rounding};
 
 const BPS: i128 = 10_000;
@@ -36,8 +36,7 @@ pub trait FeeHost {
     fn total_assets(e: &Env) -> i128;
     /// Shares in circulation.
     fn total_supply(e: &Env) -> i128;
-    /// Virtual shares against the donation attack, `10^decimals_offset` with OpenZeppelin's
-    /// vault; 1 for a vault without offset.
+    /// Virtual shares used by the vault against donation attacks.
     fn virtual_shares(e: &Env) -> i128;
     /// Shares held by `holder`.
     fn balance(e: &Env, holder: &Address) -> i128;
@@ -132,7 +131,7 @@ pub struct Due {
     /// Their value, in assets.
     pub fee: i128,
     last: u64,
-    /// [OZ] effective values once the fee shares are minted: supply + virtual shares, assets + 1.
+    /// Effective values once fee shares are minted: supply + virtual shares, assets + 1.
     pub supply: i128,
     pub assets: i128,
 }
@@ -208,7 +207,7 @@ impl FeeLib {
     }
 
     /// Mint the management fee due. HOOK: call before any operation reads a share price
-    /// (deposit, mint, withdraw, redeem, queue settlement, adapter changes).
+    /// (deposit, mint, withdraw, redeem, queue settlement, allocation or deallocation).
     pub fn accrue<H: FeeHost>(e: &Env) {
         let d = Self::due::<H>(e);
         if d.shares > 0 {
@@ -220,15 +219,13 @@ impl FeeLib {
         e.storage().instance().set(&FeeKey::FeeLastAccrual, &d.last);
     }
 
-    /// [OZ] convert_to_shares_with_rounding: assets × (supply + virtual) / (assets + 1);
-    /// [Std] on the supply after the management fee due (as in deposit previews).
+    /// Convert assets to shares using the effective supply and assets after management fees.
     pub fn to_shares<H: FeeHost>(e: &Env, assets: i128, rounding: Rounding) -> i128 {
         let d = Self::due::<H>(e);
         mul_div(e, assets.max(0), d.supply, d.assets, rounding)
     }
 
-    /// [OZ] convert_to_assets_with_rounding: shares × (assets + 1) / (supply + virtual);
-    /// [Std] on the supply after the management fee due (as in redeem previews).
+    /// Convert shares to assets using the effective supply and assets after management fees.
     pub fn to_assets<H: FeeHost>(e: &Env, shares: i128, rounding: Rounding) -> i128 {
         let d = Self::due::<H>(e);
         mul_div(e, shares.max(0), d.assets, d.supply, rounding)
@@ -273,9 +270,8 @@ impl FeeLib {
 
     // ---- Sales: penalty and performance fee ----
 
-    /// HOOK: the amounts of selling `shares` of `owner`, BEFORE its balance changes. [OZ] the
-    /// value of the shares (sales round down). [Ours] then the early-exit penalty on that value,
-    /// and the performance fee on what is left above the shares' cost:
+    /// HOOK: the amounts of selling `shares` of `owner`, BEFORE its balance changes. The gross
+    /// value rounds down; then the early-exit penalty and holder performance fee apply:
     ///   gross = shares × assets / supply;   after = gross × (1 − penalty rate)
     ///   performance = rate × max(0, after − cost of the shares);   paid = after − performance
     /// Without an owner (standard previews), no performance fee.
@@ -315,8 +311,8 @@ impl FeeLib {
     }
 
     /// For a withdrawal of exactly `assets`: the fewest shares whose sale pays at least
-    /// `assets` (rounded in the vault's favour, as [OZ] rounds withdrawals), or None beyond the
-    /// owner's balance. [Ours] Within a penalty tier the payout grows with the shares, but it
+    /// `assets`, rounded in the vault's favour, or None beyond the owner's balance. Within a
+    /// penalty tier the payout grows with the shares, but it
     /// drops when a tier starts: search each tier's range, lowest first, by bisection. Without
     /// an owner (a preview), no performance fee and no balance limit.
     pub fn shares_for<H: FeeHost>(e: &Env, owner: Option<&Address>, assets: i128) -> Option<i128> {
@@ -378,6 +374,7 @@ impl FeeLib {
 pub trait VaultFees {
     type Host: FeeHost;
 
+    /// Return the active management, performance, and early-exit fee configuration.
     fn fees(e: &Env) -> Fees {
         FeeLib::fees(e)
     }
@@ -431,8 +428,8 @@ fn part_of_cost<H: FeeHost>(e: &Env, owner: &Address, shares: i128) -> Option<i1
     Some(mul_div(e, FeeLib::cost_basis(e, owner), shares.clamp(0, balance), balance, Rounding::Ceil))
 }
 
-/// [OZ] the value of the shares (sales round down). [Ours] then the early-exit penalty on that
-/// value, and, when the shares' cost is known, the performance fee on what is left above it.
+/// The value of the shares (rounded down), followed by the early-exit penalty and, when the
+/// shares' cost is known, the performance fee on the remaining gain.
 fn sale_amounts(e: &Env, f: &Fees, d: &Due, shares: i128, cost: Option<i128>) -> Sale {
     let gross = mul_div(e, shares.max(0), d.assets, d.supply, Rounding::Floor);
     let after = mul_div(e, gross, BPS - penalty_bps(f, shares), BPS, Rounding::Floor);
